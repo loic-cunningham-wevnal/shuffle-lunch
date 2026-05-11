@@ -7,6 +7,7 @@ import { useSettings, settingsToProfile } from "@/lib/settings-store";
 import { useDebounced } from "@/hooks/use-debounced";
 import { useSolver } from "@/hooks/use-solver";
 import { useResultState, type ResultSnapshot } from "@/hooks/use-result-state";
+import { useFileDrop } from "@/hooks/use-file-drop";
 import { hashSeedString } from "@/lib/seed";
 import { filterEligible } from "@cli/groups";
 import type { ScoringContext } from "@cli/grouping/score";
@@ -268,6 +269,13 @@ export function ShuffleApp() {
     [membersQuery.data, scoringCtx, seedNumber, result],
   );
 
+  // Drag a .xlsx onto the window to import — same code path as the Import
+  // button in the toolbar.
+  const { isDraggingFile } = useFileDrop({
+    accept: [".xlsx"],
+    onFile: onImportFile,
+  });
+
   const onClearChanges = useCallback(() => {
     const confirmMsg = view?.hasEdits
       ? "Discard your unsaved edits and locks?"
@@ -323,6 +331,38 @@ export function ShuffleApp() {
 
   return (
     <div className="min-h-screen flex flex-col">
+      {/* OS file-drag overlay — appears when the user drags an .xlsx anywhere
+          over the window. Pointer-events-none so the underlying window-level
+          drop handler still receives the drop. */}
+      {isDraggingFile ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#7e57ff]/15 backdrop-blur-sm pointer-events-none">
+          <div className="border-2 border-dashed border-[#7e57ff] rounded-xl px-12 py-10 bg-zinc-950/85 text-center flex flex-col items-center">
+            <svg
+              width="32"
+              height="32"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-[#a98aff] mb-3"
+              aria-hidden
+            >
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            <div className="text-base font-medium text-zinc-100">
+              Drop to import
+            </div>
+            <div className="text-xs text-zinc-400 mt-1">
+              Replaces the current state with the file&apos;s groups
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {/* TOP BAR — brand, chips, centered search, action buttons. Always
           visible regardless of which tab is active. */}
       <header className="border-b border-zinc-800 px-4 py-2.5 flex items-center gap-4">
