@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import type { FlatMember } from "@cli/flat-member";
 import type { SolutionScore } from "@cli/grouping";
 import type { ScoringContext } from "@cli/grouping/score";
@@ -10,6 +10,8 @@ import { scoreSolution } from "@cli/grouping/score";
 // to the solver's bench sentinel (= groupCount) when running.
 export type LockValue = number | "bench";
 export type LocksState = Map<number, LockValue>;
+
+const STORAGE_KEY = "shuffle-lunch.result-state.v1";
 
 // Where the visible result came from. `live` = current solver output (with
 // optional manual edits on top). `history` = loaded a saved entry.
@@ -50,6 +52,11 @@ type Action =
       snapshot: ResultSnapshot;
     }
   | {
+      type: "set-from-import";
+      label: string | null;
+      snapshot: ResultSnapshot;
+    }
+  | {
       type: "move-member";
       memberNo: number;
       toGroupIndex: number | "bench";
@@ -58,7 +65,9 @@ type Action =
   | { type: "toggle-lock"; memberNo: number }
   | { type: "clear-locks" }
   | { type: "discard-edits" }
-  | { type: "back-to-live" };
+  | { type: "back-to-live" }
+  | { type: "hydrate"; state: State }
+  | { type: "reset-all" };
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
@@ -102,6 +111,27 @@ function reducer(state: State, action: Action): State {
         locks: new Map(),
       };
     }
+    case "set-from-import": {
+      // Imported xlsx behaves like a history entry: snapshot becomes the
+      // canonical view, solver auto-run is paused (since mode != live), and
+      // locks reset.
+      return {
+        kind: "loaded",
+        mode: {
+          kind: "history",
+          id: `import-${Date.now()}`,
+          label: action.label,
+          updatedAt: new Date().toISOString(),
+        },
+        snapshot: action.snapshot,
+        hasEdits: false,
+        locks: new Map(),
+      };
+    }
+    case "hydrate":
+      return action.state;
+    case "reset-all":
+      return { kind: "empty", locks: new Map() };
     case "move-member": {
       if (state.kind !== "loaded") return state;
       const moved = applyMove(
@@ -215,11 +245,80 @@ function applyMove(
   };
 }
 
+// Plain-JSON projection so we can ship state through localStorage. Maps
+// become arrays of [k, v] pairs.
+type SerializedState =
+  | { kind: "empty"; locks: [number, LockValue][] }
+  | {
+      kind: "loaded";
+      mode: ResultMode;
+      snapshot: ResultSnapshot;
+      hasEdits: boolean;
+      locks: [number, LockValue][];
+    };
+
+function toSerialized(state: State): SerializedState {
+  if (state.kind === "empty") {
+    return { kind: "empty", locks: Array.from(state.locks.entries()) };
+  }
+  return {
+    kind: "loaded",
+    mode: state.mode,
+    snapshot: state.snapshot,
+    hasEdits: state.hasEdits,
+    locks: Array.from(state.locks.entries()),
+  };
+}
+
+function fromSerialized(s: SerializedState): State {
+  if (s.kind === "empty") return { kind: "empty", locks: new Map(s.locks) };
+  return {
+    kind: "loaded",
+    mode: s.mode,
+    snapshot: s.snapshot,
+    hasEdits: s.hasEdits,
+    locks: new Map(s.locks),
+  };
+}
+
 export function useResultState() {
   const [state, dispatch] = useReducer(
     reducer,
     { kind: "empty", locks: new Map() } as State,
   );
+  const hydratedRef = useRef(false);
+
+  // Hydrate from localStorage on mount. We read in an effect (not lazy
+  // initializer) to avoid touching browser APIs during SSR.
+  useEffect(() => {
+    if (hydratedRef.current) return;
+    hydratedRef.current = true;
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as SerializedState;
+      // Crude shape guard — anything that doesn't look right is dropped.
+      if (parsed && (parsed.kind === "empty" || parsed.kind === "loaded")) {
+        dispatch({ type: "hydrate", state: fromSerialized(parsed) });
+      }
+    } catch {
+      // Ignore corrupted localStorage; fall back to fresh state.
+    }
+  }, []);
+
+  // Persist on every change — but only AFTER hydration ran, to avoid
+  // overwriting a saved value with the empty initial state on first render.
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify(toSerialized(state)),
+      );
+    } catch {
+      // Quota exceeded etc. — non-fatal.
+    }
+  }, [state]);
 
   const setFromSolver = useCallback((snapshot: ResultSnapshot) => {
     dispatch({ type: "set-from-solver", snapshot });
@@ -248,6 +347,13 @@ export function useResultState() {
     [],
   );
 
+  const setFromImport = useCallback(
+    (snapshot: ResultSnapshot, label: string | null) => {
+      dispatch({ type: "set-from-import", snapshot, label });
+    },
+    [],
+  );
+
   const toggleLock = useCallback(
     (memberNo: number) => dispatch({ type: "toggle-lock", memberNo }),
     [],
@@ -255,6 +361,14 @@ export function useResultState() {
   const clearLocks = useCallback(() => dispatch({ type: "clear-locks" }), []);
   const discardEdits = useCallback(() => dispatch({ type: "discard-edits" }), []);
   const backToLive = useCallback(() => dispatch({ type: "back-to-live" }), []);
+  const resetAll = useCallback(() => {
+    dispatch({ type: "reset-all" });
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const view = useMemo(() => {
     if (state.kind === "empty") return null;
@@ -270,10 +384,12 @@ export function useResultState() {
     locks: state.locks,
     setFromSolver,
     setFromHistory,
+    setFromImport,
     moveMember,
     toggleLock,
     clearLocks,
     discardEdits,
     backToLive,
+    resetAll,
   };
 }

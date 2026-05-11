@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { trpc } from "@/trpc/client";
 import { useSettings, settingsToProfile } from "@/lib/settings-store";
@@ -11,12 +11,15 @@ import { hashSeedString } from "@/lib/seed";
 import { filterEligible } from "@cli/groups";
 import type { ScoringContext } from "@cli/grouping/score";
 import type { HistoryEntry } from "@cli/history";
+import { shuffleHistoryToBuffer } from "@cli/excel-builder";
+import { importGroupsFromXlsx } from "@/lib/import-xlsx";
 import { SettingsPanel } from "./settings-panel";
 import { GroupsView } from "./groups-view";
 import { RunStatus } from "./run-status";
 import { PreviewPanel } from "./preview-panel";
 import { HistoryPanel } from "./history-panel";
 import { MembersPanel } from "./members-panel";
+import { HeaderSearch } from "./header-search";
 
 type Tab = "groups" | "preview" | "history" | "members";
 
@@ -55,12 +58,10 @@ export function ShuffleApp() {
   const { state: solverState, run, cancel } = useSolver();
   const result = useResultState();
 
-  // Auto-run solver when not viewing a history entry. We pause auto-runs in
-  // history mode so loaded edits aren't blown away by the slider re-runs.
+  // Auto-run solver when not viewing a history/imported entry. We pause
+  // auto-runs in non-live modes so a loaded snapshot isn't overwritten.
   const inHistoryMode = result.view?.mode.kind === "history";
 
-  // Translate the UI lock map (no → groupIdx | "bench") into the solver's
-  // (no → number) shape, where the bench sentinel is `groupCount`.
   const solverLocks = useMemo(() => {
     const out = new Map<number, number>();
     for (const [no, target] of result.locks) {
@@ -175,12 +176,7 @@ export function ShuffleApp() {
         allMembers: membersQuery.data?.members ?? [],
       }),
     });
-  }, [
-    view,
-    saveMutation,
-    debounced,
-    membersQuery.data,
-  ]);
+  }, [view, saveMutation, debounced, membersQuery.data]);
 
   const onSaveOverwrite = useCallback(async () => {
     if (!view || view.mode.kind !== "history") return;
@@ -199,6 +195,119 @@ export function ShuffleApp() {
     });
   }, [view, saveMutation, debounced, membersQuery.data]);
 
+  // ----- Top toolbar: download / import / clear -----
+  const [toolbarStatus, setToolbarStatus] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const flashStatus = (msg: string) => {
+    setToolbarStatus(msg);
+    window.setTimeout(() => {
+      setToolbarStatus((cur) => (cur === msg ? null : cur));
+    }, 4000);
+  };
+
+  const onDownload = useCallback(async () => {
+    if (!view) return;
+    const payload = {
+      runAt: new Date().toISOString(),
+      profile: settingsToProfile(debounced),
+      seed: view.snapshot.seed,
+      groupCount: view.snapshot.groupCount,
+      groupSize: view.snapshot.groupSize,
+      allMembers: membersQuery.data?.members ?? [],
+      groups: view.snapshot.groups,
+      bench: view.snapshot.bench,
+      initialScore: view.snapshot.initialScore,
+      finalScore: view.snapshot.finalScore,
+      used: view.snapshot.used,
+      filters: debounced.filters,
+    };
+    try {
+      const buf = await shuffleHistoryToBuffer(payload);
+      const blob = new Blob([buf], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const filename = `shuffle-lunch-${payload.runAt.replace(/[:.]/g, "-")}.xlsx`;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      flashStatus(`Downloaded ${filename}`);
+    } catch (e) {
+      flashStatus(
+        `Download failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }, [view, debounced, membersQuery.data]);
+
+  const onImportFile = useCallback(
+    async (file: File) => {
+      try {
+        const buffer = await file.arrayBuffer();
+        const { snapshot, warnings } = await importGroupsFromXlsx(
+          buffer,
+          membersQuery.data?.members ?? [],
+          scoringCtx,
+          seedNumber,
+        );
+        result.setFromImport(snapshot, file.name);
+        setTab("groups");
+        const w = warnings.length ? ` (${warnings.length} warnings)` : "";
+        flashStatus(
+          `Imported ${snapshot.groups.length} groups, ${snapshot.bench.length} benched${w}`,
+        );
+      } catch (e) {
+        flashStatus(
+          `Import failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    },
+    [membersQuery.data, scoringCtx, seedNumber, result],
+  );
+
+  const onClearChanges = useCallback(() => {
+    const confirmMsg = view?.hasEdits
+      ? "Discard your unsaved edits and locks?"
+      : "Clear the current saved snapshot from this browser?";
+    if (!window.confirm(confirmMsg)) return;
+    result.resetAll();
+    flashStatus("Cleared.");
+  }, [view, result]);
+
+  // ----- Search → highlight -----
+  // `liveMatches` = the full set of members matching the current query string
+  // (updates as the user types). `highlight` = a one-off selection that scrolls
+  // into view + flashes brighter than the live ring.
+  const [liveMatches, setLiveMatches] = useState<Set<number>>(new Set());
+  const [highlight, setHighlight] = useState<
+    { memberNo: number; gen: number } | null
+  >(null);
+  const highlightGenRef = useRef(0);
+
+  const onSearchMatchesChange = useCallback((nos: Set<number>) => {
+    setLiveMatches(nos);
+    // Auto-switch to Groups tab as soon as the user starts typing — search
+    // is meaningless on Members / Excel preview / History tabs.
+    if (nos.size > 0) setTab("groups");
+  }, []);
+
+  const onSearchSelect = useCallback(
+    (memberNo: number) => {
+      setTab("groups");
+      highlightGenRef.current += 1;
+      setHighlight({ memberNo, gen: highlightGenRef.current });
+    },
+    [],
+  );
+
+  const searchCandidates = useMemo(() => {
+    if (!view) return [];
+    return [...view.snapshot.groups.flat(), ...view.snapshot.bench];
+  }, [view]);
+
   const totalIters = debounced.solver.iterations * debounced.solver.restarts;
   const totalMembers = membersQuery.data?.members.length ?? 0;
 
@@ -214,16 +323,19 @@ export function ShuffleApp() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="border-b border-zinc-800 px-4 py-3 flex items-center gap-4 flex-wrap">
-        <div>
-          <h1 className="text-sm font-semibold tracking-wider uppercase text-zinc-100">
+      {/* TOP BAR — brand, chips, centered search, action buttons. Always
+          visible regardless of which tab is active. */}
+      <header className="border-b border-zinc-800 px-4 py-2.5 flex items-center gap-4">
+        <div className="shrink-0">
+          <h1 className="text-sm font-semibold tracking-wider uppercase text-zinc-100 leading-none">
             shuffle-lunch
           </h1>
-          <div className="text-[10px] text-zinc-500 leading-snug">
+          <div className="text-[10px] text-zinc-500 mt-0.5">
             score-based group solver · in-browser
           </div>
         </div>
-        <div className="flex items-center gap-2 text-xs text-zinc-400 ml-2">
+
+        <div className="hidden md:flex items-center gap-1.5 text-xs text-zinc-400">
           <Chip label="members" value={String(totalMembers)} />
           <Chip
             label="eligible"
@@ -249,18 +361,77 @@ export function ShuffleApp() {
           ) : null}
         </div>
 
-        <ModeBadge view={view} hasEdits={view?.hasEdits ?? false} />
+        {/* Centered search — flex-1 to take all remaining space, justify-center
+            inside to center the input within it. */}
+        <div className="flex-1 flex justify-center min-w-0">
+          <HeaderSearch
+            candidates={searchCandidates}
+            onSelect={onSearchSelect}
+            onMatchesChange={onSearchMatchesChange}
+          />
+        </div>
 
-        <div className="ml-auto flex items-center gap-3">
-          <RunStatus state={solverState} totalIters={totalIters} />
-          {solverState.status === "running" ? (
-            <button
-              type="button"
-              onClick={cancel}
-              className="text-xs bg-rose-900/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-200 rounded px-2 py-1"
-            >
-              cancel
-            </button>
+        <div className="shrink-0 flex items-center gap-2">
+          <ToolbarButton
+            onClick={onDownload}
+            disabled={!view}
+            title="Download current state as .xlsx"
+          >
+            <DownloadIcon />
+            <span className="hidden lg:inline">Download</span>
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={() => importInputRef.current?.click()}
+            title="Import a starting state from an .xlsx file"
+          >
+            <UploadIcon />
+            <span className="hidden lg:inline">Import</span>
+          </ToolbarButton>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.currentTarget.files?.[0];
+              e.currentTarget.value = "";
+              if (f) void onImportFile(f);
+            }}
+          />
+          <ToolbarButton
+            onClick={onClearChanges}
+            tone="danger"
+            title="Discard local edits and persisted state"
+          >
+            <TrashIcon />
+            <span className="hidden lg:inline">Clear</span>
+          </ToolbarButton>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="text-xs text-zinc-500 hover:text-zinc-200 border border-zinc-800 hover:border-zinc-700 rounded px-2 py-1.5 ml-1"
+          >
+            sign out
+          </button>
+        </div>
+      </header>
+
+      {/* SECONDARY BAR — solver status, mode/save controls, toolbar feedback. */}
+      <div className="border-b border-zinc-800 px-4 py-1.5 flex items-center gap-3 bg-zinc-950/60">
+        <ModeBadge view={view} hasEdits={view?.hasEdits ?? false} />
+        <RunStatus state={solverState} totalIters={totalIters} />
+        {solverState.status === "running" ? (
+          <button
+            type="button"
+            onClick={cancel}
+            className="text-xs bg-rose-900/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-200 rounded px-2 py-0.5"
+          >
+            cancel
+          </button>
+        ) : null}
+        <div className="ml-auto flex items-center gap-2">
+          {toolbarStatus ? (
+            <span className="text-[11px] text-zinc-400">{toolbarStatus}</span>
           ) : null}
           <SaveControls
             view={view}
@@ -270,15 +441,8 @@ export function ShuffleApp() {
             onSaveOverwrite={onSaveOverwrite}
             onBackToLive={result.backToLive}
           />
-          <button
-            type="button"
-            onClick={onLogout}
-            className="text-xs text-zinc-500 hover:text-zinc-200 border border-zinc-800 hover:border-zinc-700 rounded px-2 py-1"
-          >
-            sign out
-          </button>
         </div>
-      </header>
+      </div>
 
       <div className="flex-1 flex min-h-0">
         <aside className="w-80 shrink-0 border-r border-zinc-800 overflow-y-auto p-3">
@@ -317,6 +481,8 @@ export function ShuffleApp() {
                 finalScore={visibleSnapshot?.finalScore ?? null}
                 groupSize={groupSize}
                 locks={result.locks}
+                highlight={highlight}
+                liveMatches={liveMatches}
                 onMove={onMove}
                 onToggleLock={result.toggleLock}
               />
@@ -385,7 +551,7 @@ function ModeBadge({
     );
   }
   return (
-    <span className="text-[10px] uppercase tracking-wider text-[#a98aff] font-medium">
+    <span className="text-[10px] uppercase tracking-wider text-[#a98aff] font-medium truncate max-w-[40ch]">
       editing · {view.mode.label || view.mode.id}
       {hasEdits ? " · unsaved" : ""}
     </span>
@@ -458,6 +624,97 @@ function SaveControls({
         {saving ? "Saving…" : "Save changes"}
       </button>
     </>
+  );
+}
+
+function ToolbarButton({
+  onClick,
+  disabled,
+  title,
+  tone,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  title?: string;
+  tone?: "danger";
+  children: React.ReactNode;
+}) {
+  const base =
+    "text-xs flex items-center gap-1.5 rounded px-2.5 py-1.5 border transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
+  const palette =
+    tone === "danger"
+      ? "border-zinc-800 hover:border-rose-800/60 text-zinc-300 hover:text-rose-300 hover:bg-rose-950/30"
+      : "border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-900/60";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`${base} ${palette}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+function UploadIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" y1="3" x2="12" y2="15" />
+    </svg>
+  );
+}
+function TrashIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+    </svg>
   );
 }
 

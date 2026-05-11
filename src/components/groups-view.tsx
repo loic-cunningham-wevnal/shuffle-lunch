@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type DragEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import type { FlatMember } from "@cli/flat-member";
 import type { SolutionScore } from "@cli/grouping";
 import type { LocksState } from "@/hooks/use-result-state";
@@ -27,6 +27,13 @@ type Props = {
   finalScore: SolutionScore | null;
   groupSize: number;
   locks: LocksState;
+  // Member.no to scroll-into-view + flash. Caller bumps a generation token to
+  // re-trigger the same member (so search-clearing-then-re-search works).
+  highlight: { memberNo: number; gen: number } | null;
+  // Live "search-as-you-type" highlight set. Every member whose .no is in this
+  // set gets a soft amber ring; non-matching members dim to half-opacity so
+  // the matches stand out across the page.
+  liveMatches: Set<number>;
   // Move callback: index in [0..groups.length-1] to move into a group, or
   // "bench" to send to the bench. Members are identified by their .no.
   onMove: (memberNo: number, to: number | "bench") => void;
@@ -39,11 +46,32 @@ export function GroupsView({
   finalScore,
   groupSize,
   locks,
+  highlight,
+  liveMatches,
   onMove,
   onToggleLock,
 }: Props) {
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const [draggingNo, setDraggingNo] = useState<number | null>(null);
+  const [flashingNo, setFlashingNo] = useState<number | null>(null);
+
+  // When the parent bumps `highlight`, find the row by data-member-no, scroll
+  // it into view, and flash a ring for ~1.5s. Looked up via document.query
+  // rather than refs because group cards re-render frequently and stale refs
+  // would point at unmounted nodes.
+  useEffect(() => {
+    if (!highlight) return;
+    const el = document.querySelector<HTMLElement>(
+      `[data-member-no="${highlight.memberNo}"]`,
+    );
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setFlashingNo(highlight.memberNo);
+    const t = window.setTimeout(() => {
+      setFlashingNo((cur) => (cur === highlight.memberNo ? null : cur));
+    }, 1800);
+    return () => window.clearTimeout(t);
+  }, [highlight]);
 
   if (groups.length === 0) {
     return (
@@ -128,6 +156,9 @@ export function GroupsView({
                   onToggleLock={onToggleLock}
                   isDragging={draggingNo === m.no}
                   setDragging={setDraggingNo}
+                  isFlashing={flashingNo === m.no}
+                  liveMatch={liveMatches.has(m.no)}
+                  searchActive={liveMatches.size > 0}
                 />
               ))}
             </ul>
@@ -183,6 +214,9 @@ export function GroupsView({
                 onToggleLock={onToggleLock}
                 isDragging={draggingNo === m.no}
                 setDragging={setDraggingNo}
+                isFlashing={flashingNo === m.no}
+                liveMatch={liveMatches.has(m.no)}
+                searchActive={liveMatches.size > 0}
               />
             ))}
           </ul>
@@ -201,6 +235,9 @@ function MemberRow({
   onToggleLock,
   isDragging,
   setDragging,
+  isFlashing,
+  liveMatch,
+  searchActive,
 }: {
   member: FlatMember;
   currentGroupValue: string;
@@ -210,9 +247,27 @@ function MemberRow({
   onToggleLock: (memberNo: number) => void;
   isDragging: boolean;
   setDragging: (no: number | null) => void;
+  isFlashing: boolean;
+  liveMatch: boolean;
+  searchActive: boolean;
 }) {
+  // Visual layering, brightest wins:
+  //   1. Flash (just-selected from search): hard amber ring + pulse
+  //   2. Live match (typing): softer amber ring
+  //   3. Locked: purple ring
+  //   4. Plain row
+  // When search is active and this row is NOT a match, dim it so matches pop.
+  const ringClass = isFlashing
+    ? "ring-2 ring-[#fcd34d] bg-[#fcd34d]/15 animate-pulse"
+    : liveMatch
+      ? "ring-1 ring-[#fcd34d]/60 bg-[#fcd34d]/5"
+      : isLocked
+        ? "ring-1 ring-inset ring-[#7e57ff]/40 bg-[#7e57ff]/5"
+        : "";
+  const dim = searchActive && !liveMatch && !isFlashing;
   return (
     <li
+      data-member-no={member.no}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.setData(DRAG_MIME, String(member.no));
@@ -220,11 +275,9 @@ function MemberRow({
         setDragging(member.no);
       }}
       onDragEnd={() => setDragging(null)}
-      className={`flex items-center gap-2 px-3 py-1.5 text-sm transition-opacity cursor-grab active:cursor-grabbing select-none ${
-        isDragging ? "opacity-30" : ""
-      } ${
-        isLocked ? "ring-1 ring-inset ring-[#7e57ff]/40 bg-[#7e57ff]/5" : ""
-      }`}
+      className={`flex items-center gap-2 px-3 py-1.5 text-sm transition-all cursor-grab active:cursor-grabbing select-none ${
+        isDragging ? "opacity-30" : dim ? "opacity-25" : ""
+      } ${ringClass}`}
     >
       <button
         type="button"
