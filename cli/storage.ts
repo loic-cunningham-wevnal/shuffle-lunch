@@ -5,12 +5,11 @@
 // like `data/enriched/1.json`. On disk they're interpreted as relative paths
 // from the process CWD.
 //
-// Why both backends in one module:
-//   - The web app (Vercel) always has the token, so it goes to Blob.
-//   - Local dev / CLI without the token works with the same files on disk —
-//     no setup overhead just to run `bun cli/cmd/index.ts shuffle` against a
-//     local data tree.
-//   - The blob-sync CLI command sets the token to push local files up.
+// Blob access mode is **private**: bytes never traverse a public URL. Reads
+// go through @vercel/blob's `get()` (which signs the request with the
+// project's read-write token) and bytes are returned over tRPC, which is
+// already gated by the password / session cookie. The blob URLs themselves
+// are never exposed to the browser.
 
 import {
   mkdir,
@@ -21,25 +20,37 @@ import {
   stat,
 } from "node:fs/promises";
 import { dirname } from "node:path";
-import { put, list, del, head } from "@vercel/blob";
+import { put, list, del, head, get } from "@vercel/blob";
+
+const BLOB_ACCESS = "private" as const;
 
 export function usingBlob(): boolean {
   return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 }
 
+// Normalize blob keys to NFC. macOS stores filenames in NFD (decomposed
+// Unicode), so when readdir() yields a path containing Japanese kana, it
+// can disagree byte-for-byte with the same string written as a literal in
+// source code (which editors save as NFC). The blob store treats keys as
+// raw bytes, so the mismatch surfaces as "not found" on otherwise-correct
+// lookups. Normalizing on every read AND every write keeps both ends in
+// the same canonical form.
+function nfc(pathname: string): string {
+  return pathname.normalize("NFC");
+}
+
 export async function readBytes(pathname: string): Promise<Buffer> {
   if (usingBlob()) {
-    const url = await resolveBlobUrl(pathname);
-    if (!url) {
+    const result = await get(nfc(pathname), { access: BLOB_ACCESS });
+    if (!result) {
       throw new Error(`Blob not found: ${pathname}`);
     }
-    const res = await fetch(url);
-    if (!res.ok) {
+    if (result.statusCode !== 200 || !result.stream) {
       throw new Error(
-        `Blob fetch failed for ${pathname}: ${res.status} ${res.statusText}`,
+        `Blob fetch returned ${result.statusCode} for ${pathname}`,
       );
     }
-    return Buffer.from(await res.arrayBuffer());
+    return await streamToBuffer(result.stream);
   }
   return await readFile(pathname);
 }
@@ -58,8 +69,8 @@ export async function writeBytes(
   body: Buffer | ArrayBuffer | Uint8Array | string,
 ): Promise<void> {
   if (usingBlob()) {
-    await put(pathname, body as Buffer, {
-      access: "public",
+    await put(nfc(pathname), body as Buffer, {
+      access: BLOB_ACCESS,
       addRandomSuffix: false,
       allowOverwrite: true,
     });
@@ -74,8 +85,8 @@ export async function writeText(
   text: string,
 ): Promise<void> {
   if (usingBlob()) {
-    await put(pathname, text, {
-      access: "public",
+    await put(nfc(pathname), text, {
+      access: BLOB_ACCESS,
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: pathname.endsWith(".json")
@@ -98,19 +109,20 @@ export type DirEntry = {
 // List entries directly under `prefix` (no recursion). Returns [] on missing
 // directory — callers can treat empty + missing the same.
 export async function listDir(prefix: string): Promise<DirEntry[]> {
-  const normalized = prefix.endsWith("/") ? prefix : `${prefix}/`;
+  const normalized = nfc(prefix.endsWith("/") ? prefix : `${prefix}/`);
   if (usingBlob()) {
     const out: DirEntry[] = [];
     let cursor: string | undefined;
     do {
       const page = await list({ prefix: normalized, cursor });
       for (const b of page.blobs) {
+        const blobPath = nfc(b.pathname);
         // Only direct children, no nested.
-        const rest = b.pathname.slice(normalized.length);
+        const rest = blobPath.slice(normalized.length);
         if (rest.length === 0 || rest.includes("/")) continue;
         out.push({
           name: rest,
-          pathname: b.pathname,
+          pathname: blobPath,
           sizeBytes: b.size,
           modifiedAt: b.uploadedAt.toISOString(),
         });
@@ -145,7 +157,12 @@ export async function listDir(prefix: string): Promise<DirEntry[]> {
 
 export async function exists(pathname: string): Promise<boolean> {
   if (usingBlob()) {
-    return (await resolveBlobUrl(pathname)) !== null;
+    try {
+      await head(nfc(pathname));
+      return true;
+    } catch {
+      return false;
+    }
   }
   try {
     await access(pathname);
@@ -157,26 +174,31 @@ export async function exists(pathname: string): Promise<boolean> {
 
 export async function remove(pathname: string): Promise<void> {
   if (usingBlob()) {
-    const url = await resolveBlobUrl(pathname);
-    if (!url) return; // already gone — no-op
-    await del(url);
+    try {
+      await del(nfc(pathname));
+    } catch {
+      // ignore — same semantics as the local fs branch (no error if missing)
+    }
     return;
   }
   const { unlink } = await import("node:fs/promises");
   try {
     await unlink(pathname);
   } catch {
-    // ignore — same semantics as blob no-op
+    // ignore
   }
 }
 
-// Vercel Blob doesn't have a "get by pathname" call — you need the URL. With
-// addRandomSuffix: false, the URL is stable, so head() finds it.
-async function resolveBlobUrl(pathname: string): Promise<string | null> {
-  try {
-    const meta = await head(pathname);
-    return meta.url;
-  } catch {
-    return null;
+async function streamToBuffer(
+  stream: ReadableStream<Uint8Array>,
+): Promise<Buffer> {
+  const chunks: Uint8Array[] = [];
+  const reader = stream.getReader();
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
   }
+  return Buffer.concat(chunks);
 }

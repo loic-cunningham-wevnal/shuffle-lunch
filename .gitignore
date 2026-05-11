@@ -50,3 +50,5 @@ members.xlsx
 members-flat.xlsx
 data/
 import/
+.vercel
+.env*.local

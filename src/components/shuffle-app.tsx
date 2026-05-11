@@ -16,8 +16,9 @@ import { GroupsView } from "./groups-view";
 import { RunStatus } from "./run-status";
 import { PreviewPanel } from "./preview-panel";
 import { HistoryPanel } from "./history-panel";
+import { MembersPanel } from "./members-panel";
 
-type Tab = "groups" | "preview" | "history";
+type Tab = "groups" | "preview" | "history" | "members";
 
 export function ShuffleApp() {
   // Hydrate after client mount to avoid SSR/zustand-persist mismatch.
@@ -273,6 +274,12 @@ export function ShuffleApp() {
             >
               History
             </TabButton>
+            <TabButton
+              active={tab === "members"}
+              onClick={() => setTab("members")}
+            >
+              Members
+            </TabButton>
           </nav>
           <div className="flex-1 overflow-auto p-4 min-h-0">
             {tab === "groups" ? (
@@ -290,13 +297,15 @@ export function ShuffleApp() {
                 profile={settingsToProfile(debounced)}
                 filters={debounced.filters}
               />
-            ) : (
+            ) : tab === "history" ? (
               <HistoryPanel
                 onLoad={loadEntry}
                 loadedId={
                   view?.mode.kind === "history" ? view.mode.id : null
                 }
               />
+            ) : (
+              <MembersPanel />
             )}
           </div>
         </main>

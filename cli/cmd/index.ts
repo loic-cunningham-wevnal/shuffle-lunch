@@ -5,6 +5,7 @@ import { runReport } from "./report";
 import { runExportMembers } from "./export-members";
 import { runImportMembers } from "./import-members";
 import { runBlobSync } from "./blob-sync";
+import { runBuildMembers } from "./build-members";
 
 const HELP = `shuffle-lunch — group members for lunch
 
@@ -37,8 +38,12 @@ Commands:
                       Options:
                         --file <path>             input xlsx (required)
                         --dry-run                 show what would change without writing
-  blob-sync           Upload local data files to Vercel Blob (members.xlsx, data/, import/).
-                      Requires BLOB_READ_WRITE_TOKEN env var.
+  build-members       Parse members.xlsx + Notion + enrichment cache into the canonical
+                      data/members.json file. Run before blob-sync.
+                      Options:
+                        --out <path>              override output path (default data/members.json)
+  blob-sync           Upload data/members.json + data/history/* + data/grouping-profiles/*
+                      to Vercel Blob. Requires BLOB_READ_WRITE_TOKEN env var.
                       Options:
                         --dry-run                 list what would be uploaded without writing
                         --prune                   delete blobs that don't have a local counterpart
@@ -69,6 +74,9 @@ switch (command) {
     break;
   case "blob-sync":
     await runBlobSync(rest);
+    break;
+  case "build-members":
+    await runBuildMembers(rest);
     break;
   case undefined:
   case "help":

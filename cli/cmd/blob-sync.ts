@@ -10,24 +10,18 @@ import { intro, log, outro } from "@clack/prompts";
 import { walkLocalFiles } from "./walk";
 import { put, list, del } from "@vercel/blob";
 
+// Only the canonical artifacts the web app reads or writes go to blob.
+// Raw inputs (members.xlsx, Notion source, enrichment cache) stay local —
+// they're inputs to the CLI's build-members pipeline, not the deployed app.
 const DEFAULT_PATHS = [
-  "members.xlsx",
-  "data/members-flat.xlsx",
-  "data/enriched",
+  "data/members.json",
   "data/grouping-profiles",
   "data/history",
-  "import",
 ];
 
-// We deliberately skip Notion image attachments — the web app only parses
-// markdown / csv / xlsx / json. Including images would balloon a 1 MB sync
-// into a multi-hundred-MB one and burn the Vercel Blob free tier.
-const DEFAULT_INCLUDE_EXTS = new Set([
-  ".json",
-  ".xlsx",
-  ".csv",
-  ".md",
-]);
+// JSON-only: no xlsx, no csv, no markdown. The deployed app only consumes
+// canonical JSON; pre-processing (parsing Notion / xlsx) happens locally.
+const DEFAULT_INCLUDE_EXTS = new Set([".json"]);
 
 type Args = {
   dryRun: boolean;
@@ -103,8 +97,10 @@ export async function runBlobSync(rawArgs: string[]): Promise<void> {
   for (const f of local) {
     try {
       const body = await Bun.file(f.fsPath).arrayBuffer();
-      await put(f.key, body, {
-        access: "public",
+      // Normalize to NFC so macOS NFD filenames don't fork the blob keyspace
+      // away from NFC literals used in source code.
+      await put(f.key.normalize("NFC"), body, {
+        access: "private",
         addRandomSuffix: false,
         allowOverwrite: true,
       });
