@@ -53,6 +53,9 @@ const MemberPatchSchema = z
   })
   .strict();
 
+// Required + optional shape for creation. `no` is server-assigned (max+1).
+const CreateMemberSchema = FlatMemberSchema.omit({ no: true });
+
 export const membersRouter = router({
   list: publicProcedure.query(async () => {
     const members = await loadAll();
@@ -85,5 +88,39 @@ export const membersRouter = router({
       members[idx] = updated;
       await saveAll(members);
       return { ok: true as const, member: updated };
+    }),
+
+  // Create a new member. The server picks the next `no` as max + 1 so the
+  // client never has to know the current highest id and concurrent creates
+  // can't collide on a duplicate.
+  create: publicProcedure
+    .input(CreateMemberSchema)
+    .mutation(async ({ input }) => {
+      const members = await loadAll();
+      const nextNo =
+        members.reduce((acc, m) => (m.no > acc ? m.no : acc), 0) + 1;
+      const created: FlatMember = FlatMemberSchema.parse({
+        ...input,
+        no: nextNo,
+      });
+      members.push(created);
+      await saveAll(members);
+      return { ok: true as const, member: created };
+    }),
+
+  delete: publicProcedure
+    .input(z.object({ no: z.number().int().positive() }))
+    .mutation(async ({ input }) => {
+      const members = await loadAll();
+      const idx = members.findIndex((m) => m.no === input.no);
+      if (idx < 0) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: `Member no=${input.no} not found`,
+        });
+      }
+      const removed = members.splice(idx, 1)[0]!;
+      await saveAll(members);
+      return { ok: true as const, member: removed };
     }),
 });

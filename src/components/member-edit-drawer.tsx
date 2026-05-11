@@ -5,10 +5,14 @@ import { trpc } from "@/trpc/client";
 import { MBTI_TYPES, VIBE_TAGS } from "@cli/enrichment-schema";
 import type { FlatMember } from "@cli/flat-member";
 
+// `mode = 'edit'` updates an existing member; `mode = 'new'` creates one and
+// the input `member.no` is ignored (server assigns the next id).
 type Props = {
+  mode: "edit" | "new";
   member: FlatMember;
   onClose: () => void;
   onSaved: () => void;
+  onDeleted?: () => void;
 };
 
 type Draft = {
@@ -72,10 +76,18 @@ function nullableInt(s: string): number | null {
   return n;
 }
 
-export function MemberEditDrawer({ member, onClose, onSaved }: Props) {
+export function MemberEditDrawer({
+  mode,
+  member,
+  onClose,
+  onSaved,
+  onDeleted,
+}: Props) {
   const [draft, setDraft] = useState<Draft>(() => memberToDraft(member));
   const [error, setError] = useState<string | null>(null);
   const updateMutation = trpc.members.update.useMutation();
+  const createMutation = trpc.members.create.useMutation();
+  const deleteMutation = trpc.members.delete.useMutation();
 
   // If the underlying member changes (e.g. parent invalidates and refetches),
   // reset the form. We compare by .no to avoid resetting on every reference
@@ -126,37 +138,61 @@ export function MemberEditDrawer({ member, onClose, onSaved }: Props) {
       return;
     }
 
+    const fields = {
+      name: draft.name.trim(),
+      name_romaji: nullable(draft.name_romaji),
+      department: draft.department.trim(),
+      detailed_department: nullable(draft.detailed_department),
+      job_title: nullable(draft.job_title),
+      joined_year: parsedJoinedYear,
+      age: parsedAge,
+      hometown: nullable(draft.hometown),
+      hobbies: nullable(draft.hobbies),
+      comment: nullable(draft.comment),
+      surprising_fact: nullable(draft.surprising_fact),
+      is_remote: draft.is_remote,
+      is_unavailable: draft.is_unavailable,
+      prev_count: parsedPrev,
+      birth_month_flag: draft.birth_month_flag,
+      gender: draft.gender,
+      mbti: draft.mbti,
+      vibe: draft.vibe,
+      confidence: draft.confidence,
+      ai_notes: nullable(draft.ai_notes),
+    };
+
     try {
-      await updateMutation.mutateAsync({
-        no: member.no,
-        patch: {
-          name: draft.name.trim(),
-          name_romaji: nullable(draft.name_romaji),
-          department: draft.department.trim(),
-          detailed_department: nullable(draft.detailed_department),
-          job_title: nullable(draft.job_title),
-          joined_year: parsedJoinedYear,
-          age: parsedAge,
-          hometown: nullable(draft.hometown),
-          hobbies: nullable(draft.hobbies),
-          comment: nullable(draft.comment),
-          surprising_fact: nullable(draft.surprising_fact),
-          is_remote: draft.is_remote,
-          is_unavailable: draft.is_unavailable,
-          prev_count: parsedPrev,
-          birth_month_flag: draft.birth_month_flag,
-          gender: draft.gender,
-          mbti: draft.mbti,
-          vibe: draft.vibe,
-          confidence: draft.confidence,
-          ai_notes: nullable(draft.ai_notes),
-        },
-      });
+      if (mode === "new") {
+        await createMutation.mutateAsync(fields);
+      } else {
+        await updateMutation.mutateAsync({ no: member.no, patch: fields });
+      }
       onSaved();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed");
     }
   };
+
+  const onDelete = async () => {
+    setError(null);
+    if (
+      !window.confirm(
+        `Delete ${member.name}? This removes them from the master list.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await deleteMutation.mutateAsync({ no: member.no });
+      onDeleted?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+    }
+  };
+
+  const isNew = mode === "new";
+  const saving = createMutation.isPending || updateMutation.isPending;
+  const deleting = deleteMutation.isPending;
 
   return (
     <>
@@ -173,12 +209,12 @@ export function MemberEditDrawer({ member, onClose, onSaved }: Props) {
         <header className="px-5 py-3 border-b border-zinc-800 flex items-start justify-between gap-3 sticky top-0 bg-zinc-950 z-10">
           <div className="min-w-0">
             <div className="text-[10px] uppercase tracking-wider text-zinc-500">
-              Member · #{member.no}
+              {isNew ? "New member" : `Member · #${member.no}`}
             </div>
             <h2 className="text-base font-medium text-zinc-100 truncate">
-              {draft.name || member.name}
+              {draft.name || (isNew ? "(unnamed)" : member.name)}
             </h2>
-            {member.name_romaji ? (
+            {!isNew && member.name_romaji ? (
               <div className="text-xs text-zinc-500 font-mono truncate">
                 {member.name_romaji}
               </div>
@@ -374,14 +410,28 @@ export function MemberEditDrawer({ member, onClose, onSaved }: Props) {
         </div>
 
         <footer className="px-5 py-3 border-t border-zinc-800 flex items-center justify-between gap-3 bg-zinc-950 sticky bottom-0">
-          <div className="text-[11px] text-zinc-500 min-h-[1em] flex-1">
-            {error ? (
-              <span className="text-rose-400">{error}</span>
-            ) : dirty ? (
-              "Unsaved changes"
-            ) : (
-              "All saved."
-            )}
+          <div className="text-[11px] text-zinc-500 min-h-[1em] flex items-center gap-2 flex-1">
+            {!isNew ? (
+              <button
+                type="button"
+                onClick={onDelete}
+                disabled={saving || deleting}
+                className="text-[11px] text-rose-400 hover:text-rose-300 hover:underline underline-offset-2 disabled:opacity-40"
+              >
+                {deleting ? "Deleting…" : "Delete"}
+              </button>
+            ) : null}
+            <span className={!isNew ? "ml-2" : ""}>
+              {error ? (
+                <span className="text-rose-400">{error}</span>
+              ) : isNew ? (
+                "Fill in the required fields and click Create."
+              ) : dirty ? (
+                "Unsaved changes"
+              ) : (
+                "All saved."
+              )}
+            </span>
           </div>
           <button
             type="button"
@@ -393,10 +443,16 @@ export function MemberEditDrawer({ member, onClose, onSaved }: Props) {
           <button
             type="button"
             onClick={onSave}
-            disabled={!dirty || updateMutation.isPending}
+            disabled={(!isNew && !dirty) || saving || deleting}
             className="text-xs bg-[#7e57ff] hover:bg-[#8e66ff] disabled:opacity-40 disabled:cursor-not-allowed text-white rounded px-3 py-1.5 font-medium"
           >
-            {updateMutation.isPending ? "Saving…" : "Save changes"}
+            {saving
+              ? isNew
+                ? "Creating…"
+                : "Saving…"
+              : isNew
+                ? "Create member"
+                : "Save changes"}
           </button>
         </footer>
       </aside>

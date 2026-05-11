@@ -41,7 +41,15 @@ function nfc(pathname: string): string {
 
 export async function readBytes(pathname: string): Promise<Buffer> {
   if (usingBlob()) {
-    const result = await get(nfc(pathname), { access: BLOB_ACCESS });
+    // useCache:false bypasses the CDN. Without it, get() can return a stale
+    // body for ~30s after a write — the read-after-write window swallowed our
+    // members.create response and the next list call still saw the prior
+    // members.json. The app is small-data + low-volume so the round trip to
+    // origin storage is cheap; correctness wins.
+    const result = await get(nfc(pathname), {
+      access: BLOB_ACCESS,
+      useCache: false,
+    });
     if (!result) {
       throw new Error(`Blob not found: ${pathname}`);
     }

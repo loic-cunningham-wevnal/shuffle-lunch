@@ -5,9 +5,40 @@ import { trpc } from "@/trpc/client";
 import type { FlatMember } from "@cli/flat-member";
 import { MemberEditDrawer } from "./member-edit-drawer";
 
+// A blank FlatMember the new-member form is seeded with. `no = 0` is a
+// placeholder; the server assigns the real id on create.
+const BLANK_MEMBER: FlatMember = {
+  no: 0,
+  name: "",
+  name_romaji: null,
+  department: "",
+  detailed_department: null,
+  job_title: null,
+  joined_year: null,
+  age: null,
+  hometown: null,
+  hobbies: null,
+  comment: null,
+  surprising_fact: null,
+  is_remote: false,
+  is_unavailable: false,
+  prev_count: 0,
+  birth_month_flag: false,
+  gender: null,
+  mbti: null,
+  vibe: null,
+  confidence: null,
+  ai_notes: null,
+};
+
+type DrawerState =
+  | { mode: "edit"; memberNo: number }
+  | { mode: "new" }
+  | null;
+
 export function MembersPanel() {
   const [search, setSearch] = useState("");
-  const [editingNo, setEditingNo] = useState<number | null>(null);
+  const [drawer, setDrawer] = useState<DrawerState>(null);
   const utils = trpc.useUtils();
   const listQuery = trpc.members.list.useQuery();
 
@@ -25,10 +56,11 @@ export function MembersPanel() {
     );
   }, [members, search]);
 
-  const editingMember = useMemo<FlatMember | null>(() => {
-    if (editingNo === null) return null;
-    return members.find((m) => m.no === editingNo) ?? null;
-  }, [members, editingNo]);
+  const drawerMember = useMemo<FlatMember | null>(() => {
+    if (!drawer) return null;
+    if (drawer.mode === "new") return BLANK_MEMBER;
+    return members.find((m) => m.no === drawer.memberNo) ?? null;
+  }, [members, drawer]);
 
   if (listQuery.isLoading) {
     return (
@@ -55,9 +87,30 @@ export function MembersPanel() {
           placeholder="Search by name, romaji, department…"
           className="bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-sm flex-1 max-w-md"
         />
-        <span className="text-xs text-zinc-500">
+        <span className="text-xs text-zinc-500 mr-auto">
           {filtered.length} of {listQuery.data?.total ?? 0}
         </span>
+        <button
+          type="button"
+          onClick={() => setDrawer({ mode: "new" })}
+          className="text-xs bg-[#7e57ff] hover:bg-[#8e66ff] text-white rounded px-3 py-1.5 font-medium flex items-center gap-1.5"
+        >
+          <svg
+            width="11"
+            height="11"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          New member
+        </button>
       </div>
 
       <div className="flex-1 min-h-0 overflow-auto border border-zinc-800/60 rounded-lg bg-zinc-950/50">
@@ -84,20 +137,26 @@ export function MembersPanel() {
               <MemberRow
                 key={m.no}
                 member={m}
-                isSelected={editingNo === m.no}
-                onClick={() => setEditingNo(m.no)}
+                isSelected={drawer?.mode === "edit" && drawer.memberNo === m.no}
+                onClick={() => setDrawer({ mode: "edit", memberNo: m.no })}
               />
             ))}
           </tbody>
         </table>
       </div>
 
-      {editingMember ? (
+      {drawerMember ? (
         <MemberEditDrawer
-          member={editingMember}
-          onClose={() => setEditingNo(null)}
+          mode={drawer?.mode === "new" ? "new" : "edit"}
+          member={drawerMember}
+          onClose={() => setDrawer(null)}
           onSaved={() => {
             void utils.members.list.invalidate();
+            setDrawer(null);
+          }}
+          onDeleted={() => {
+            void utils.members.list.invalidate();
+            setDrawer(null);
           }}
         />
       ) : null}
