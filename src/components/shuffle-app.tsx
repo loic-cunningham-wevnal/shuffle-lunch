@@ -59,6 +59,16 @@ export function ShuffleApp() {
   // history mode so loaded edits aren't blown away by the slider re-runs.
   const inHistoryMode = result.view?.mode.kind === "history";
 
+  // Translate the UI lock map (no → groupIdx | "bench") into the solver's
+  // (no → number) shape, where the bench sentinel is `groupCount`.
+  const solverLocks = useMemo(() => {
+    const out = new Map<number, number>();
+    for (const [no, target] of result.locks) {
+      out.set(no, target === "bench" ? groupCount : target);
+    }
+    return out;
+  }, [result.locks, groupCount]);
+
   useEffect(() => {
     if (!hydrated) return;
     if (inHistoryMode) return;
@@ -73,6 +83,7 @@ export function ShuffleApp() {
       metricParams: debounced.metricParams,
       history: pairHistoryQuery.data,
       seed: seedNumber,
+      locks: solverLocks,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -87,6 +98,7 @@ export function ShuffleApp() {
     debounced.weights,
     debounced.solver,
     debounced.metricParams,
+    solverLocks,
   ]);
 
   // Push solver result into the editable state.
@@ -219,6 +231,22 @@ export function ShuffleApp() {
             tone={eligible.length < groupCount * groupSize ? "warn" : undefined}
           />
           <Chip label="groups" value={`${groupCount} × ${groupSize}`} />
+          {result.locks.size > 0 ? (
+            <button
+              type="button"
+              onClick={result.clearLocks}
+              title="Clear all locks"
+              className="flex items-baseline gap-1.5 px-2 py-0.5 rounded border border-[#7e57ff]/50 bg-[#7e57ff]/10 text-[#a98aff] hover:bg-[#7e57ff]/20"
+            >
+              <span className="text-[10px] uppercase tracking-wider">
+                locked
+              </span>
+              <span className="text-xs font-mono tabular-nums">
+                {result.locks.size}
+              </span>
+              <span className="text-[10px] opacity-70 ml-0.5">clear</span>
+            </button>
+          ) : null}
         </div>
 
         <ModeBadge view={view} hasEdits={view?.hasEdits ?? false} />
@@ -287,7 +315,10 @@ export function ShuffleApp() {
                 groups={visibleSnapshot?.groups ?? []}
                 bench={visibleSnapshot?.bench ?? []}
                 finalScore={visibleSnapshot?.finalScore ?? null}
+                groupSize={groupSize}
+                locks={result.locks}
                 onMove={onMove}
+                onToggleLock={result.toggleLock}
               />
             ) : tab === "preview" ? (
               <PreviewPanel

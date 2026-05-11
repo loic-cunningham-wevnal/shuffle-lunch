@@ -4,6 +4,8 @@ import type { BuildScoredGroupsResult } from "@cli/grouping";
 
 export type SolverRequest = {
   type: "run";
+  // `locks` (the Map of memberNo → groupIndex/bench-sentinel) survives the
+  // postMessage boundary unchanged — structured clone supports Map natively.
   payload: Omit<BuildScoredGroupsOptions, "onProgress">;
 };
 

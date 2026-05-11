@@ -6,6 +6,11 @@ import type { SolutionScore } from "@cli/grouping";
 import type { ScoringContext } from "@cli/grouping/score";
 import { scoreSolution } from "@cli/grouping/score";
 
+// Lock value: numeric group index 0..N-1, or "bench". The reducer translates
+// to the solver's bench sentinel (= groupCount) when running.
+export type LockValue = number | "bench";
+export type LocksState = Map<number, LockValue>;
+
 // Where the visible result came from. `live` = current solver output (with
 // optional manual edits on top). `history` = loaded a saved entry.
 export type ResultMode =
@@ -26,12 +31,13 @@ export type ResultSnapshot = {
 };
 
 type State =
-  | { kind: "empty" }
+  | { kind: "empty"; locks: LocksState }
   | {
       kind: "loaded";
       mode: ResultMode;
       snapshot: ResultSnapshot;
       hasEdits: boolean;
+      locks: LocksState;
     };
 
 type Action =
@@ -49,6 +55,8 @@ type Action =
       toGroupIndex: number | "bench";
       ctx: ScoringContext;
     }
+  | { type: "toggle-lock"; memberNo: number }
+  | { type: "clear-locks" }
   | { type: "discard-edits" }
   | { type: "back-to-live" };
 
@@ -65,14 +73,22 @@ function reducer(state: State, action: Action): State {
       ) {
         return state;
       }
+      // Carry locks across solver runs (they describe user intent, not the
+      // run output) but reconcile their target group indexes against the new
+      // snapshot — if a member ended up in a different group than they were
+      // locked to, the lock value still points at the original index because
+      // the solver respected it.
       return {
         kind: "loaded",
         mode: { kind: "live" },
         snapshot: action.snapshot,
         hasEdits: false,
+        locks: state.locks,
       };
     }
     case "set-from-history": {
+      // Loading a history entry wipes locks — they're transient editing intent
+      // tied to a particular live run.
       return {
         kind: "loaded",
         mode: {
@@ -83,6 +99,7 @@ function reducer(state: State, action: Action): State {
         },
         snapshot: action.snapshot,
         hasEdits: false,
+        locks: new Map(),
       };
     }
     case "move-member": {
@@ -94,7 +111,33 @@ function reducer(state: State, action: Action): State {
         action.ctx,
       );
       if (!moved) return state;
-      return { ...state, snapshot: moved, hasEdits: true };
+      // If the member is locked, update their lock to follow the manual move.
+      // Otherwise leave locks alone.
+      let nextLocks = state.locks;
+      if (state.locks.has(action.memberNo)) {
+        nextLocks = new Map(state.locks);
+        nextLocks.set(action.memberNo, action.toGroupIndex);
+      }
+      return { ...state, snapshot: moved, hasEdits: true, locks: nextLocks };
+    }
+    case "toggle-lock": {
+      if (state.kind !== "loaded") return state;
+      const next = new Map(state.locks);
+      if (next.has(action.memberNo)) {
+        next.delete(action.memberNo);
+      } else {
+        // Lock to current location.
+        const loc = locateMember(state.snapshot, action.memberNo);
+        if (!loc) return state;
+        next.set(action.memberNo, loc);
+      }
+      return { ...state, locks: next };
+    }
+    case "clear-locks": {
+      if (state.locks.size === 0) return state;
+      return state.kind === "loaded"
+        ? { ...state, locks: new Map() }
+        : { ...state, locks: new Map() };
     }
     case "discard-edits": {
       // Without retaining the pre-edit snapshot, discarding edits in live
@@ -105,10 +148,21 @@ function reducer(state: State, action: Action): State {
     }
     case "back-to-live": {
       // Same: drop the loaded mode; the next solver run will repopulate.
-      if (state.kind !== "loaded") return { kind: "empty" };
-      return { kind: "empty" };
+      if (state.kind !== "loaded") return { kind: "empty", locks: state.locks };
+      return { kind: "empty", locks: state.locks };
     }
   }
+}
+
+function locateMember(
+  snapshot: ResultSnapshot,
+  memberNo: number,
+): LockValue | null {
+  for (let gi = 0; gi < snapshot.groups.length; gi++) {
+    if (snapshot.groups[gi]!.some((m) => m.no === memberNo)) return gi;
+  }
+  if (snapshot.bench.some((m) => m.no === memberNo)) return "bench";
+  return null;
 }
 
 function applyMove(
@@ -162,7 +216,10 @@ function applyMove(
 }
 
 export function useResultState() {
-  const [state, dispatch] = useReducer(reducer, { kind: "empty" } as State);
+  const [state, dispatch] = useReducer(
+    reducer,
+    { kind: "empty", locks: new Map() } as State,
+  );
 
   const setFromSolver = useCallback((snapshot: ResultSnapshot) => {
     dispatch({ type: "set-from-solver", snapshot });
@@ -191,6 +248,11 @@ export function useResultState() {
     [],
   );
 
+  const toggleLock = useCallback(
+    (memberNo: number) => dispatch({ type: "toggle-lock", memberNo }),
+    [],
+  );
+  const clearLocks = useCallback(() => dispatch({ type: "clear-locks" }), []);
   const discardEdits = useCallback(() => dispatch({ type: "discard-edits" }), []);
   const backToLive = useCallback(() => dispatch({ type: "back-to-live" }), []);
 
@@ -203,5 +265,15 @@ export function useResultState() {
     };
   }, [state]);
 
-  return { view, setFromSolver, setFromHistory, moveMember, discardEdits, backToLive };
+  return {
+    view,
+    locks: state.locks,
+    setFromSolver,
+    setFromHistory,
+    moveMember,
+    toggleLock,
+    clearLocks,
+    discardEdits,
+    backToLive,
+  };
 }

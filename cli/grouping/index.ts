@@ -12,6 +12,11 @@ import { simulatedAnneal } from "./solver";
 import { scoreSolution, type SolutionScore, type ScoringContext, type MetricBreakdown } from "./score";
 import type { RecentPairs } from "./pair-key";
 
+// `groupCount` (= bench) is the sentinel for "locked to bench". Group indices
+// use 0..groupCount-1 inclusive.
+export type LockTarget = number;
+export type LockMap = Map<number, LockTarget>;
+
 export type BuildScoredGroupsOptions = {
   profiles: FlatMember[];
   groupCount: number;
@@ -28,6 +33,11 @@ export type BuildScoredGroupsOptions = {
     best: number;
     current: number;
   }) => void;
+  // Member.no → group index (0..groupCount-1) or `groupCount` for bench.
+  // Locked members are placed in their target during warm-start AND restarts,
+  // and the simulated-annealing loop refuses to swap them. The total head
+  // count locked into a single group must not exceed `groupSize`.
+  locks?: LockMap;
 };
 
 export type BuildScoredGroupsResult = {
@@ -86,7 +96,17 @@ export async function buildScoredGroups(
     metricParams: opts.metricParams ?? DEFAULT_METRIC_PARAMS,
   };
 
-  const initialAssigned = warmStart(eligible, opts.groupCount, opts.groupSize, rng);
+  const locks = opts.locks ?? new Map();
+  validateLocks(eligible, locks, opts.groupCount, opts.groupSize);
+  const lockedNos = new Set(locks.keys());
+
+  const initialAssigned = warmStart(
+    eligible,
+    opts.groupCount,
+    opts.groupSize,
+    rng,
+    locks,
+  );
   const initialBench = leftoverBench(eligible, initialAssigned);
   const initialGroupsWithBench = withBench(initialAssigned, initialBench);
   const initialScore = scoreSolution(initialAssigned, ctx);
@@ -98,6 +118,7 @@ export async function buildScoredGroups(
     threeCycleProbability: opts.solver.threeCycleProbability,
     assignedGroupCount: opts.groupCount,
     rng,
+    lockedMemberNos: lockedNos,
     onProgress: opts.onProgress
       ? (info) =>
           opts.onProgress!({
@@ -111,14 +132,13 @@ export async function buildScoredGroups(
 
   for (let r = 1; r < opts.solver.restarts; r++) {
     const restartRng = createRng(seed ^ ((r + 1) * 0x9e3779b1));
-    const shuffled = shuffleAll(eligible, restartRng);
-    const restartAssigned = sliceIntoGroups(
-      shuffled,
+    const restartGroupsWithBench = restartShuffle(
+      eligible,
       opts.groupCount,
       opts.groupSize,
+      restartRng,
+      locks,
     );
-    const restartBench = shuffled.slice(opts.groupCount * opts.groupSize);
-    const restartGroupsWithBench = withBench(restartAssigned, restartBench);
     const result = simulatedAnneal(restartGroupsWithBench, ctx, {
       iterations: opts.solver.iterations,
       initialTemp: opts.solver.initialTemp,
@@ -126,6 +146,7 @@ export async function buildScoredGroups(
       threeCycleProbability: opts.solver.threeCycleProbability,
       assignedGroupCount: opts.groupCount,
       rng: restartRng,
+      lockedMemberNos: lockedNos,
       onProgress: opts.onProgress
         ? (info) =>
             opts.onProgress!({
@@ -167,16 +188,74 @@ export function buildScoredOutput(
   }));
 }
 
+// Validate that the locks fit within the requested shape. Catching this here
+// gives a clean error to the caller before the solver bails on the same
+// constraint inside SA.
+function validateLocks(
+  eligible: readonly FlatMember[],
+  locks: LockMap,
+  groupCount: number,
+  groupSize: number,
+): void {
+  const eligibleNos = new Set(eligible.map((m) => m.no));
+  const perGroup = new Array(groupCount).fill(0);
+  for (const [no, target] of locks) {
+    if (!eligibleNos.has(no)) {
+      // Locks for filtered-out members are silently ignored — happens when
+      // someone toggles availability after locking.
+      continue;
+    }
+    if (target === groupCount) continue; // bench
+    if (target < 0 || target >= groupCount) {
+      throw new Error(
+        `Lock target ${target} for member ${no} is outside [0, ${groupCount}]`,
+      );
+    }
+    perGroup[target] = (perGroup[target] ?? 0) + 1;
+    if (perGroup[target] > groupSize) {
+      throw new Error(
+        `Group ${target + 1} has ${perGroup[target]} locked members, exceeding groupSize=${groupSize}`,
+      );
+    }
+  }
+}
+
 // Seeded version of the dept-bucket round-robin from src/groups.ts. Inlined so
 // the seeded RNG can drive the per-bucket shuffle, giving deterministic output.
+//
+// Locked members are placed in their target group/bench first; the
+// round-robin then fills remaining slots. If a member is locked to a group
+// that's already full of other locked members, this throws (validateLocks
+// catches that earlier).
 function warmStart(
   profiles: FlatMember[],
   groupCount: number,
   groupSize: number,
   rng: Rng,
+  locks: LockMap,
 ): FlatMember[][] {
-  const buckets = new Map<string, FlatMember[]>();
+  const groups: FlatMember[][] = Array.from({ length: groupCount }, () => []);
+
+  // Seed locks first — locked-to-group entries land in their group, locked-to-
+  // bench entries are removed from the pool entirely (they'll resurface as
+  // bench in leftoverBench).
+  const lockedNos = new Set<number>();
   for (const p of profiles) {
+    const target = locks.get(p.no);
+    if (target === undefined) continue;
+    if (target === groupCount) {
+      // bench
+      lockedNos.add(p.no);
+      continue;
+    }
+    groups[target]!.push(p);
+    lockedNos.add(p.no);
+  }
+
+  const free = profiles.filter((p) => !lockedNos.has(p.no));
+
+  const buckets = new Map<string, FlatMember[]>();
+  for (const p of free) {
     const list = buckets.get(p.department) ?? [];
     list.push(p);
     buckets.set(p.department, list);
@@ -186,7 +265,6 @@ function warmStart(
   const sortedDepartments = [...buckets.entries()].sort(
     (a, b) => b[1].length - a[1].length,
   );
-  const groups: FlatMember[][] = Array.from({ length: groupCount }, () => []);
   let cursor = 0;
   for (const [, list] of sortedDepartments) {
     for (const member of list) {
@@ -202,6 +280,51 @@ function warmStart(
     if (groups.every((g) => g.length >= groupSize)) break;
   }
   return groups;
+}
+
+// Restart shuffle with locks: locked members stay in their assigned group;
+// remaining slots are filled with a re-shuffled subset of the unlocked pool.
+function restartShuffle(
+  eligible: readonly FlatMember[],
+  groupCount: number,
+  groupSize: number,
+  rng: Rng,
+  locks: LockMap,
+): FlatMember[][] {
+  const groups: FlatMember[][] = Array.from({ length: groupCount }, () => []);
+  const benched: FlatMember[] = [];
+  const lockedNos = new Set<number>();
+
+  for (const p of eligible) {
+    const target = locks.get(p.no);
+    if (target === undefined) continue;
+    if (target === groupCount) {
+      benched.push(p);
+    } else {
+      groups[target]!.push(p);
+    }
+    lockedNos.add(p.no);
+  }
+
+  const free = eligible.filter((m) => !lockedNos.has(m.no));
+  const shuffled = shuffleAll(free, rng);
+
+  // Round-robin fill into groups respecting capacity.
+  let cursor = 0;
+  for (const m of shuffled) {
+    let placed = false;
+    for (let attempts = 0; attempts < groupCount; attempts++) {
+      const idx = cursor % groupCount;
+      cursor++;
+      if (groups[idx]!.length < groupSize) {
+        groups[idx]!.push(m);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) benched.push(m);
+  }
+  return withBench(groups, benched);
 }
 
 function seededShuffle<T>(arr: T[], rng: Rng): void {
@@ -229,18 +352,6 @@ function shuffleAll<T>(arr: readonly T[], rng: Rng): T[] {
   for (let i = out.length - 1; i > 0; i--) {
     const j = rng.int(i + 1);
     [out[i], out[j]] = [out[j]!, out[i]!];
-  }
-  return out;
-}
-
-function sliceIntoGroups<T>(
-  arr: T[],
-  groupCount: number,
-  groupSize: number,
-): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < groupCount; i++) {
-    out.push(arr.slice(i * groupSize, (i + 1) * groupSize));
   }
   return out;
 }

@@ -1,7 +1,9 @@
 "use client";
 
+import { useState, type DragEvent } from "react";
 import type { FlatMember } from "@cli/flat-member";
 import type { SolutionScore } from "@cli/grouping";
+import type { LocksState } from "@/hooks/use-result-state";
 
 const METRIC_LABELS: Record<string, string> = {
   genderBalance: "♀/♂",
@@ -15,16 +17,34 @@ const METRIC_LABELS: Record<string, string> = {
   recentPairPenalty: "pair",
 };
 
+const DRAG_MIME = "application/x-shuffle-lunch-member";
+
+type DropTarget = number | "bench";
+
 type Props = {
   groups: FlatMember[][];
   bench: FlatMember[];
   finalScore: SolutionScore | null;
+  groupSize: number;
+  locks: LocksState;
   // Move callback: index in [0..groups.length-1] to move into a group, or
   // "bench" to send to the bench. Members are identified by their .no.
   onMove: (memberNo: number, to: number | "bench") => void;
+  onToggleLock: (memberNo: number) => void;
 };
 
-export function GroupsView({ groups, bench, finalScore, onMove }: Props) {
+export function GroupsView({
+  groups,
+  bench,
+  finalScore,
+  groupSize,
+  locks,
+  onMove,
+  onToggleLock,
+}: Props) {
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  const [draggingNo, setDraggingNo] = useState<number | null>(null);
+
   if (groups.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-zinc-500 text-sm">
@@ -38,21 +58,58 @@ export function GroupsView({ groups, bench, finalScore, onMove }: Props) {
     label: `Group ${gi + 1}`,
   }));
 
+  const handleDrop = (target: DropTarget) => (e: DragEvent) => {
+    e.preventDefault();
+    setDropTarget(null);
+    setDraggingNo(null);
+    const data = e.dataTransfer.getData(DRAG_MIME);
+    if (!data) return;
+    const memberNo = Number(data);
+    if (!Number.isInteger(memberNo)) return;
+    onMove(memberNo, target);
+  };
+
+  const handleDragOver = (target: DropTarget) => (e: DragEvent) => {
+    if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dropTarget !== target) setDropTarget(target);
+  };
+
   return (
     <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]">
       {groups.map((members, gi) => {
         const breakdown = finalScore?.groupBreakdowns[gi];
         const score = finalScore?.groupScores[gi] ?? 0;
+        const overflowing = members.length > groupSize;
+        const isDropTarget = dropTarget === gi;
         return (
           <div
             key={gi}
-            className="bg-zinc-900/40 border border-zinc-800/60 rounded-lg overflow-hidden"
+            onDragOver={handleDragOver(gi)}
+            onDragLeave={() => {
+              if (dropTarget === gi) setDropTarget(null);
+            }}
+            onDrop={handleDrop(gi)}
+            className={`rounded-lg overflow-hidden transition-colors border ${
+              isDropTarget
+                ? "border-[#7e57ff] bg-[#7e57ff]/10"
+                : overflowing
+                  ? "border-amber-700/50 bg-amber-950/10"
+                  : "border-zinc-800/60 bg-zinc-900/40"
+            }`}
           >
             <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/60 bg-zinc-900/60">
               <div className="text-xs uppercase tracking-wider text-zinc-300">
                 Group {gi + 1}
-                <span className="ml-2 text-zinc-500 normal-case font-normal">
-                  ({members.length})
+                <span
+                  className={`ml-2 normal-case font-normal ${
+                    overflowing ? "text-amber-300" : "text-zinc-500"
+                  }`}
+                  title={overflowing ? `Over capacity (${groupSize})` : undefined}
+                >
+                  ({members.length}
+                  {overflowing ? `/${groupSize}` : ""})
                 </span>
               </div>
               <div className="text-xs font-mono text-zinc-400 tabular-nums">
@@ -67,6 +124,10 @@ export function GroupsView({ groups, bench, finalScore, onMove }: Props) {
                   currentGroupValue={String(gi)}
                   groupOptions={groupOptions}
                   onMove={onMove}
+                  isLocked={locks.has(m.no)}
+                  onToggleLock={onToggleLock}
+                  isDragging={draggingNo === m.no}
+                  setDragging={setDraggingNo}
                 />
               ))}
             </ul>
@@ -85,33 +146,48 @@ export function GroupsView({ groups, bench, finalScore, onMove }: Props) {
           </div>
         );
       })}
-      {bench.length > 0 || groups.length > 0 ? (
-        <div className="bg-zinc-900/20 border border-dashed border-zinc-800 rounded-lg overflow-hidden col-span-full">
-          <div className="px-3 py-2 border-b border-zinc-800/60 text-xs uppercase tracking-wider text-zinc-400">
-            Bench{" "}
-            <span className="text-zinc-600 normal-case font-normal ml-1">
-              ({bench.length})
-            </span>
-          </div>
-          {bench.length === 0 ? (
-            <div className="px-3 py-3 text-xs text-zinc-600">
-              No benched members.
-            </div>
-          ) : (
-            <ul className="divide-y divide-zinc-800/40 max-h-48 overflow-y-auto">
-              {bench.map((m) => (
-                <MemberRow
-                  key={m.no}
-                  member={m}
-                  currentGroupValue="bench"
-                  groupOptions={groupOptions}
-                  onMove={onMove}
-                />
-              ))}
-            </ul>
-          )}
+      <div
+        onDragOver={handleDragOver("bench")}
+        onDragLeave={() => {
+          if (dropTarget === "bench") setDropTarget(null);
+        }}
+        onDrop={handleDrop("bench")}
+        className={`rounded-lg overflow-hidden col-span-full border transition-colors ${
+          dropTarget === "bench"
+            ? "border-[#7e57ff] bg-[#7e57ff]/10"
+            : "border-dashed border-zinc-800 bg-zinc-900/20"
+        }`}
+      >
+        <div className="px-3 py-2 border-b border-zinc-800/60 text-xs uppercase tracking-wider text-zinc-400">
+          Bench{" "}
+          <span className="text-zinc-600 normal-case font-normal ml-1">
+            ({bench.length})
+          </span>
         </div>
-      ) : null}
+        {bench.length === 0 ? (
+          <div className="px-3 py-3 text-xs text-zinc-600">
+            {dropTarget === "bench"
+              ? "Drop here to bench"
+              : "No benched members."}
+          </div>
+        ) : (
+          <ul className="divide-y divide-zinc-800/40 max-h-48 overflow-y-auto">
+            {bench.map((m) => (
+              <MemberRow
+                key={m.no}
+                member={m}
+                currentGroupValue="bench"
+                groupOptions={groupOptions}
+                onMove={onMove}
+                isLocked={locks.has(m.no)}
+                onToggleLock={onToggleLock}
+                isDragging={draggingNo === m.no}
+                setDragging={setDraggingNo}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
@@ -121,14 +197,51 @@ function MemberRow({
   currentGroupValue,
   groupOptions,
   onMove,
+  isLocked,
+  onToggleLock,
+  isDragging,
+  setDragging,
 }: {
   member: FlatMember;
   currentGroupValue: string;
   groupOptions: { value: string; label: string }[];
   onMove: (memberNo: number, to: number | "bench") => void;
+  isLocked: boolean;
+  onToggleLock: (memberNo: number) => void;
+  isDragging: boolean;
+  setDragging: (no: number | null) => void;
 }) {
   return (
-    <li className="flex items-center gap-2 px-3 py-1.5 text-sm group">
+    <li
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(DRAG_MIME, String(member.no));
+        e.dataTransfer.effectAllowed = "move";
+        setDragging(member.no);
+      }}
+      onDragEnd={() => setDragging(null)}
+      className={`flex items-center gap-2 px-3 py-1.5 text-sm transition-opacity cursor-grab active:cursor-grabbing select-none ${
+        isDragging ? "opacity-30" : ""
+      } ${
+        isLocked ? "ring-1 ring-inset ring-[#7e57ff]/40 bg-[#7e57ff]/5" : ""
+      }`}
+    >
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleLock(member.no);
+        }}
+        title={isLocked ? "Locked — click to unlock" : "Lock to this group"}
+        aria-label={isLocked ? "Unlock member" : "Lock member"}
+        className={`shrink-0 ${
+          isLocked
+            ? "text-[#a98aff]"
+            : "text-zinc-700 hover:text-zinc-400"
+        } transition-colors`}
+      >
+        {isLocked ? <LockClosedIcon /> : <LockOpenIcon />}
+      </button>
       <span className="text-zinc-100 truncate flex-1 min-w-0">
         {member.name}
       </span>
@@ -141,6 +254,7 @@ function MemberRow({
           const v = e.currentTarget.value;
           onMove(member.no, v === "bench" ? "bench" : Number(v));
         }}
+        onClick={(e) => e.stopPropagation()}
         className="ml-auto text-[10px] bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700 cursor-pointer focus:outline-none focus:border-[#7e57ff]"
         aria-label={`Move ${member.name}`}
       >
@@ -152,5 +266,43 @@ function MemberRow({
         <option value="bench">Bench</option>
       </select>
     </li>
+  );
+}
+
+function LockClosedIcon() {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  );
+}
+
+function LockOpenIcon() {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 7.5-2" />
+    </svg>
   );
 }

@@ -19,6 +19,9 @@ export type SolverOptions = {
   rng: Rng;
   onProgress?: (info: { iteration: number; best: number; current: number }) => void;
   progressInterval?: number;
+  // Set of member.no values that must stay in their current group for the
+  // entire run. Any swap proposal touching a locked member is skipped.
+  lockedMemberNos?: Set<number>;
 };
 
 export type SolverResult = {
@@ -64,14 +67,15 @@ export function simulatedAnneal(
 
   const progressEvery = opts.progressInterval ?? Math.max(1, Math.floor(iterations / 100));
   const newGroupScores = groupScores.slice();
+  const locked = opts.lockedMemberNos ?? new Set<number>();
 
   for (let iter = 0; iter < iterations; iter++) {
     const useThreeCycle =
       groups.length >= 3 && rng.next() < threeCycleProbability;
 
     const move = useThreeCycle
-      ? applyThreeCycle(groups, rng)
-      : applyPairSwap(groups, rng);
+      ? applyThreeCycle(groups, rng, locked)
+      : applyPairSwap(groups, rng, locked);
     if (move === null) {
       temp *= alpha;
       continue;
@@ -166,7 +170,29 @@ function pickGroupBySize(
   return -1;
 }
 
-function applyPairSwap(groups: FlatMember[][], rng: Rng): Move | null {
+// Pick an unlocked member from a group, or -1 if none. We iterate from a
+// random offset and wrap so the choice stays roughly uniform among unlocked
+// members without an extra allocation.
+function pickUnlockedMemberIdx(
+  group: FlatMember[],
+  rng: Rng,
+  locked: ReadonlySet<number>,
+): number {
+  const n = group.length;
+  if (n === 0) return -1;
+  const start = rng.int(n);
+  for (let k = 0; k < n; k++) {
+    const idx = (start + k) % n;
+    if (!locked.has(group[idx]!.no)) return idx;
+  }
+  return -1;
+}
+
+function applyPairSwap(
+  groups: FlatMember[][],
+  rng: Rng,
+  locked: ReadonlySet<number>,
+): Move | null {
   if (groups.length < 2) return null;
   const gi = pickGroupBySize(groups, rng, []);
   if (gi < 0) return null;
@@ -175,8 +201,9 @@ function applyPairSwap(groups: FlatMember[][], rng: Rng): Move | null {
   const arrI = groups[gi]!;
   const arrJ = groups[gj]!;
   if (arrI.length === 0 || arrJ.length === 0) return null;
-  const idxI = rng.int(arrI.length);
-  const idxJ = rng.int(arrJ.length);
+  const idxI = pickUnlockedMemberIdx(arrI, rng, locked);
+  const idxJ = pickUnlockedMemberIdx(arrJ, rng, locked);
+  if (idxI < 0 || idxJ < 0) return null;
   const a = arrI[idxI]!;
   const b = arrJ[idxJ]!;
   arrI[idxI] = b;
@@ -190,7 +217,11 @@ function applyPairSwap(groups: FlatMember[][], rng: Rng): Move | null {
   };
 }
 
-function applyThreeCycle(groups: FlatMember[][], rng: Rng): Move | null {
+function applyThreeCycle(
+  groups: FlatMember[][],
+  rng: Rng,
+  locked: ReadonlySet<number>,
+): Move | null {
   if (groups.length < 3) return null;
   const gi = pickGroupBySize(groups, rng, []);
   if (gi < 0) return null;
@@ -202,9 +233,10 @@ function applyThreeCycle(groups: FlatMember[][], rng: Rng): Move | null {
   const arrJ = groups[gj]!;
   const arrK = groups[gk]!;
   if (arrI.length === 0 || arrJ.length === 0 || arrK.length === 0) return null;
-  const idxI = rng.int(arrI.length);
-  const idxJ = rng.int(arrJ.length);
-  const idxK = rng.int(arrK.length);
+  const idxI = pickUnlockedMemberIdx(arrI, rng, locked);
+  const idxJ = pickUnlockedMemberIdx(arrJ, rng, locked);
+  const idxK = pickUnlockedMemberIdx(arrK, rng, locked);
+  if (idxI < 0 || idxJ < 0 || idxK < 0) return null;
   const a = arrI[idxI]!;
   const b = arrJ[idxJ]!;
   const c = arrK[idxK]!;
