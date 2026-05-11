@@ -1,0 +1,52 @@
+# dependencies
+node_modules/
+
+# output
+out/
+dist/
+*.tgz
+
+# code coverage
+coverage/
+*.lcov
+
+# logs
+logs/
+*.log
+
+# dotenv files (env values are configured in Vercel for prod; in .env.local for dev)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# caches
+.eslintcache
+.cache/
+*.tsbuildinfo
+
+# next.js
+.next/
+next-env.d.ts
+
+# Vercel
+.vercel/
+
+# IDE
+.idea/
+.vscode/
+.cursor/
+
+# macOS
+.DS_Store
+
+# ----------------------------------------------------------------------
+# Sensitive data — DO NOT commit. The deployed app reads these from
+# Vercel Blob storage instead. Use `bun cli/cmd/index.ts blob-sync` to
+# upload your local copies into the project's Blob store.
+# ----------------------------------------------------------------------
+members.xlsx
+members-flat.xlsx
+data/
+import/
